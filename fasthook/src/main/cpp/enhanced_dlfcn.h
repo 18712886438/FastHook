@@ -12,5 +12,5 @@
 bool file_exists(const char *name);
 
 int enhanced_dlclose(void *handle);
-void *enhanced_dlopen(const char *libpath, int flags);
+void *enhanced_dlopen(char *libpath, int flags);
 void *enhanced_dlsym(void *handle, const char *name);

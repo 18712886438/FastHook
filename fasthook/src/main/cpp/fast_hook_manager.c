@@ -68,6 +68,10 @@ static inline void InitJit() {
         art_jit_compiler_handle_ = enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
     }
 
+    // add back
+    void *compiler_options = (void *)ReadPointer((unsigned char *)jit_compiler_handle_ + pointer_size_);
+    memcpy((unsigned char *)compiler_options + 6 * pointer_size_, &max_units, pointer_size_);
+
 }
 
 static inline void *EntryPointToCodePoint(void *entry_point) {
