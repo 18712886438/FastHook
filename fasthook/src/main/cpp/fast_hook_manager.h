@@ -9,6 +9,8 @@
 #define LOGI(...)
 #endif
 
+int SDK_INT = 0;
+
 uint32_t kPointerSize32 = 4;
 uint32_t kPointerSize64 = 8;
 
@@ -26,6 +28,7 @@ uint32_t kArtMethodInterpreterEntryOffset = 0;
 uint32_t kArtMethodQuickCodeOffset = 0;
 uint32_t kProfilingCompileStateOffset = 0;
 uint32_t kProfilingSavedEntryPointOffset = 0;
+uint32_t kAccFastInterpreterToInterpreterInvoke = 0x40000000;
 
 uint32_t kHotMethodThreshold = 0;
 uint32_t kHotMethodMaxCount = 0;
@@ -43,7 +46,8 @@ enum Version {
 	kAndroidNMR1,
 	kAndroidO,
 	kAndroidOMR1,
-	kAndroidP
+	kAndroidP,
+	kAndroidQ
 };
 
 enum TrampolineType {
@@ -89,13 +93,15 @@ struct sigaction *default_handler_ = NULL;
 struct sigaction *current_handler_ = NULL;
 
 JavaVM *jvm_ = NULL;
-void *runtime_ = NULL;
 
 void* (*jit_load_)(bool*) = NULL;
 void* jit_compiler_handle_ = NULL;
 bool (*jit_compile_method_)(void*, void*, void*, bool) = NULL;
+bool (*jit_compile_method_Q_)(void*, void*, void*, bool, bool) = NULL;
 void** art_jit_compiler_handle_ = NULL;
 void *art_quick_to_interpreter_bridge_ = NULL;
+void (**origin_jit_update_options)(void *) = NULL;
+void (*profileSaver_ForceProcessProfiles)() = NULL;
 
 uint32_t pointer_size_ = 0;
 
@@ -254,7 +260,8 @@ unsigned char hook_trampoline_[] = {
         0x60, 0x00, 0x00, 0x58,
         0x10, 0x14, 0x40, 0xf9,
         0x00, 0x02, 0x1f, 0xd6,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
 };
 
 //60 00 00 58 ; ldr x0, #12 1f
@@ -266,8 +273,10 @@ unsigned char target_trampoline_[] = {
         0x60, 0x00, 0x00, 0x58,
         0x90, 0x00, 0x00, 0x58,
         0x00, 0x02, 0x1f, 0xd6,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
 };
 #endif
 

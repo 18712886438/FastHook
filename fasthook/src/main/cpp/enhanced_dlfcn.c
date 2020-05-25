@@ -23,9 +23,10 @@
 #include <sys/mman.h>
 #include <elf.h>
 #include <android/log.h>
+#include <ctype.h>
 #include "enhanced_dlfcn.h"
 
-#define TAG_NAME	"FastHookManager"
+#define TAG_NAME	"enhanced_dlfcn"
 
 #define log_info(fmt,args...) __android_log_print(ANDROID_LOG_ERROR, TAG_NAME, (const char *) fmt, ##args)
 #define log_err(fmt,args...) __android_log_print(ANDROID_LOG_ERROR, TAG_NAME, (const char *) fmt, ##args)
@@ -48,6 +49,8 @@
 #error "Arch unknown, please port me"
 #endif
 
+extern int SDK_INT;
+
 struct ctx {
 	void *load_addr;
 	void *dynstr;
@@ -58,6 +61,11 @@ struct ctx {
 	int symtab_num;
 	off_t bias;
 };
+
+bool file_exists(const char *name) {
+	struct stat buffer;
+	return (stat(name, &buffer) == 0);
+}
 
 int enhanced_dlclose(void *handle) {
 	if (handle) {
@@ -71,6 +79,21 @@ int enhanced_dlclose(void *handle) {
 	return 0;
 }
 
+char *rtrim(char *str)
+{
+    if (str == NULL || *str == '\0')
+    {
+        return str;
+    }
+    int len = (int)(strlen(str));
+    char *p = str + len - 1;
+    while (p >= str && isspace(*p))
+    {
+        *p = '\0'; --p;
+    }
+    return str;
+}
+
 /* flags are ignored */
 
 void *enhanced_dlopen(const char *libpath, int flags) {
@@ -80,6 +103,7 @@ void *enhanced_dlopen(const char *libpath, int flags) {
 	off_t load_addr, size;
 	int k, fd = -1, found = 0;
 	void *shoff;
+    char* p;
 	Elf_Ehdr *elf = (Elf_Ehdr *) MAP_FAILED;
 
 #define fatal(fmt, args...) do { log_err(fmt,##args); goto err_exit; } while(0)
@@ -87,8 +111,13 @@ void *enhanced_dlopen(const char *libpath, int flags) {
 	maps = fopen("/proc/self/maps", "r");
 	if (!maps) fatal("failed to open maps");
 
-	while (!found && fgets(buff, sizeof(buff), maps))
-		if (strstr(buff, "r-xp") && strstr(buff, libpath)) found = 1;
+    while (fgets(buff, sizeof(buff), maps)) {
+        if ((strstr(buff, "r-xp") || strstr(buff, "r--p")) && strstr(buff, libpath)) {
+            found = 1;
+            __android_log_print(ANDROID_LOG_DEBUG, "dlopen", "%s\n", buff);
+            break;
+        }
+    }
 
 	fclose(maps);
 
@@ -100,6 +129,16 @@ void *enhanced_dlopen(const char *libpath, int flags) {
 	log_info("%s loaded in Android at 0x%08lx", libpath, load_addr);
 
 	/* Now, mmap the same library once again */
+
+    if (SDK_INT >= __ANDROID_API_Q__) {
+        p = strtok(buff, " ");
+        while (p) {
+            p = strtok(NULL, " ");
+            if (p) {
+                libpath = rtrim(p);
+            }
+        }
+    }
 
 	fd = open(libpath, O_RDONLY);
 	if (fd < 0) fatal("failed to open %s", libpath);

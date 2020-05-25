@@ -67,7 +67,7 @@ public class FastHookManager {
         mHandler = new HookHandler();
         init(Build.VERSION.SDK_INT);
         if(Build.VERSION.SDK_INT >= ANDROID_P) {
-            disableHiddenApiCheck();
+            ReflectionUtils.passApiCheck();
         }
         Logd("Init");
     }
@@ -548,8 +548,7 @@ public class FastHookManager {
         Log.d(TAG,message);
     }
 
-    public native static void disableHiddenApiCheck();
-    private native static void init(int version);
+    private native static int init(int version);
     private native static void disableJITInline();
     private native static long getMethodEntryPoint(Member method);
     private native static boolean compileMethod(Member method);

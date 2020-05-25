@@ -12,34 +12,62 @@
 #include "enhanced_dlfcn.h"
 #include "fast_hook_manager.h"
 
+void fake_jit_update_options(void* handle) {
+    //do nothing
+    LOGI("android q: art request update compiler options");
+    return;
+}
+
 static inline void InitJit() {
     int max_units = 0;
     void *jit_lib = NULL;
     void *art_lib = NULL;
 
     if(pointer_size_ == kPointerSize32) {
-        jit_lib = enhanced_dlopen("/system/lib/libart-compiler.so", RTLD_NOW);
+        if (SDK_INT >= kAndroidQ && file_exists("/apex/com.android.runtime/lib/libart-compiler.so")) {
+            jit_lib = enhanced_dlopen("/apex/com.android.runtime/lib/libart-compiler.so", RTLD_NOW);
+            art_lib = enhanced_dlopen("/apex/com.android.runtime/lib/libart.so", RTLD_NOW);
+        } else {
+            jit_lib = enhanced_dlopen("/system/lib/libart-compiler.so", RTLD_NOW);
+            art_lib = enhanced_dlopen("/system/lib/libart.so", RTLD_NOW);
+        }
     }else {
-        jit_lib = enhanced_dlopen("/system/lib64/libart-compiler.so", RTLD_NOW);
+        if (SDK_INT >= kAndroidQ && file_exists("/apex/com.android.runtime/lib64/libart-compiler.so")) {
+            jit_lib = enhanced_dlopen("/apex/com.android.runtime/lib64/libart-compiler.so", RTLD_NOW);
+            art_lib = enhanced_dlopen("/apex/com.android.runtime/lib64/libart.so", RTLD_NOW);
+        } else {
+            jit_lib = enhanced_dlopen("/system/lib64/libart-compiler.so", RTLD_NOW);
+            art_lib = enhanced_dlopen("/system/lib64/libart.so", RTLD_NOW);
+        }
     }
 
-    if(pointer_size_ == kPointerSize32) {
-        art_lib = enhanced_dlopen("/system/lib/libart.so", RTLD_NOW);
-    }else {
-        art_lib = enhanced_dlopen("/system/lib64/libart.so", RTLD_NOW);
+    art_quick_to_interpreter_bridge_ = enhanced_dlsym(art_lib, "art_quick_to_interpreter_bridge");
+
+    if (SDK_INT >= kAndroidN) {
+        profileSaver_ForceProcessProfiles = (void (*)()) enhanced_dlsym(jit_lib, "_ZN3art12ProfileSaver20ForceProcessProfilesEv");
     }
 
-    jit_compile_method_ = (bool (*)(void *, void *, void *, bool)) enhanced_dlsym(jit_lib, "jit_compile_method");
+    if (SDK_INT < kAndroidQ) {
+        jit_compile_method_ = (bool (*)(void *, void *, void *, bool)) enhanced_dlsym(jit_lib, "jit_compile_method");
+    } else {
+        jit_compile_method_Q_ = (bool (*)(void *, void *, void *, bool, bool)) enhanced_dlsym(jit_lib, "jit_compile_method");
+        origin_jit_update_options = (void (**)(void *))(enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_update_options_E"));
+    }
+
+    if (origin_jit_update_options != NULL) {
+        *origin_jit_update_options = fake_jit_update_options;
+    }
+
     jit_load_ = (void* (*)(bool*))(enhanced_dlsym(jit_lib, "jit_load"));
     bool will_generate_debug_symbols = false;
-    jit_compiler_handle_ = (jit_load_)(&will_generate_debug_symbols);
 
-    art_jit_compiler_handle_ = enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
+    if (jit_load_ == NULL) {
+        jit_compiler_handle_ = *art_jit_compiler_handle_ = enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
+    } else {
+        jit_compiler_handle_ = (jit_load_)(&will_generate_debug_symbols);
+        art_jit_compiler_handle_ = enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
+    }
 
-    void *compiler_options = (void *)ReadPointer((unsigned char *)jit_compiler_handle_ + pointer_size_);
-    memcpy((unsigned char *)compiler_options + 6 * pointer_size_,&max_units,pointer_size_);
-
-    runtime_ = (void *)ReadPointer((unsigned char *)jvm_ + pointer_size_);
 }
 
 static inline void *EntryPointToCodePoint(void *entry_point) {
@@ -84,6 +112,16 @@ static inline void SetProfilingSaveEntryPoint(void *profiling, void *entry_point
 static inline void AddArtMethodAccessFlag(void *art_method, uint32_t flag) {
     uint32_t new_flag = ReadInt32((unsigned char *)art_method + kArtMethodAccessFlagsOffset);
     new_flag |= flag;
+
+    memcpy((unsigned char *) art_method + kArtMethodAccessFlagsOffset,&new_flag,4);
+}
+
+static inline void disableFastInterpreterForQ(void *art_method) {
+    if (SDK_INT < kAndroidQ) {
+        return;
+    }
+    uint32_t new_flag = ReadInt32((unsigned char *)art_method + kArtMethodAccessFlagsOffset);
+    new_flag &= ~kAccFastInterpreterToInterpreterInvoke;
 
     memcpy((unsigned char *) art_method + kArtMethodAccessFlagsOffset,&new_flag,4);
 }
@@ -168,6 +206,7 @@ void SignalHandle(int signal, siginfo_t *info, void *reserved) {
 void static inline InitTrampoline(int version) {
 #if defined(__arm__)
     switch(version) {
+        case kAndroidQ:
         case kAndroidP:
             hook_trampoline_[6] = 0x18;
             break;
@@ -191,6 +230,7 @@ void static inline InitTrampoline(int version) {
     }
 #elif defined(__aarch64__)
     switch(version) {
+        case kAndroidQ:
         case kAndroidP:
             hook_trampoline_[5] = 0x10;
             break;
@@ -215,39 +255,25 @@ void static inline InitTrampoline(int version) {
 #endif
 }
 
-void DisableHiddenApiCheck(JNIEnv *env, jclass clazz) {
-    if(kHiddenApiPolicyOffset > 0) {
-        int offset = 0;
-        int no_check = 0;
-
-        int policy = ReadInt32((unsigned char *)runtime_ + kHiddenApiPolicyOffset);
-        if(policy != kDarkGreyAndBlackList) {
-            int index = 0;
-            for(index = 0; index < kHiddenApiPolicyScope; index++) {
-                if(ReadInt32((unsigned char *)runtime_ + kHiddenApiPolicyOffset + index) == kDarkGreyAndBlackList) {
-                    offset = index;
-                }else if(ReadInt32((unsigned char *)runtime_ + kHiddenApiPolicyOffset - index) == kDarkGreyAndBlackList) {
-                    offset = -index;
-                }
-            }
-        }
-        memcpy((unsigned char *)runtime_ + kHiddenApiPolicyOffset + offset,&no_check,4);
-        LOGI("Disable Hidden Api Check:%d",ReadInt32((unsigned char *)runtime_ + kHiddenApiPolicyOffset + offset));
-    }
-}
-
 jint Init(JNIEnv *env, jclass clazz, jint version) {
     int ret = 0;
 
+    SDK_INT = version;
     pointer_size_ = sizeof(long);
 
-    switch(version) {
+    switch(SDK_INT) {
+        case kAndroidQ:
+            kTLSSlotArtThreadSelf = 7;
+            kAccCompileDontBother = 0x02000000;
+            kArtMethodHotnessCountOffset = 18;
+            kArtMethodProfilingOffset = RoundUp(4 * 4 +  2* 2,pointer_size_);
+            kArtMethodQuickCodeOffset = RoundUp(4 * 4 +  2* 2,pointer_size_) + pointer_size_;
+            kProfilingCompileStateOffset = (pointer_size_ * 2) + 4 + 2;
+            kProfilingSavedEntryPointOffset = pointer_size_;
+            kHotMethodThreshold = 10000;
+            kHotMethodMaxCount = 50;
+            break;
         case kAndroidP:
-            if(pointer_size_ == kPointerSize32) {
-                kHiddenApiPolicyOffset = 840;
-            }else {
-                kHiddenApiPolicyOffset = 1364;
-            }
             kTLSSlotArtThreadSelf = 7;
             kAccCompileDontBother = 0x02000000;
             kArtMethodHotnessCountOffset = 18;
@@ -299,21 +325,11 @@ jint Init(JNIEnv *env, jclass clazz, jint version) {
             break;
     }
 
-    InitTrampoline(version);
+    InitTrampoline(SDK_INT);
 
     sigaction_info_ = (struct SigactionInfo *)malloc(sizeof(struct SigactionInfo));
     sigaction_info_->addr = NULL;
     sigaction_info_->len = 0;
-
-    void *art_lib = NULL;
-
-    if(pointer_size_ == kPointerSize32) {
-        art_lib = enhanced_dlopen("/system/lib/libart.so", RTLD_NOW);
-    }else {
-        art_lib = enhanced_dlopen("/system/lib64/libart.so", RTLD_NOW);
-    }
-
-    art_quick_to_interpreter_bridge_ = enhanced_dlsym(art_lib, "art_quick_to_interpreter_bridge");
 
     if(kTLSSlotArtThreadSelf > 0) {
         InitJit();
@@ -324,6 +340,10 @@ jint Init(JNIEnv *env, jclass clazz, jint version) {
 
 void DisableJITInline(JNIEnv *env, jclass clazz) {
     int max_units = 0;
+
+    if (profileSaver_ForceProcessProfiles != NULL) {
+        profileSaver_ForceProcessProfiles();
+    }
 
     void *art_compiler_options = (void *)ReadPointer((unsigned char *)(*art_jit_compiler_handle_) + pointer_size_);
 
@@ -346,7 +366,12 @@ bool CompileMethod(JNIEnv *env, jclass clazz, jobject method) {
     void *thread = CurrentThread();
     int old_flag_and_state = ReadInt32(thread);
 
-    ret = jit_compile_method_(jit_compiler_handle_, art_method, thread, false);
+    if (SDK_INT >= kAndroidQ) {
+        ret = jit_compile_method_Q_(jit_compiler_handle_, art_method, thread, false, false);
+    } else {
+        ret = jit_compile_method_(jit_compiler_handle_, art_method, thread, false);
+    }
+
     memcpy(thread,&old_flag_and_state,4);
     LOGI("CompileMethod:%d",ret);
 
@@ -443,6 +468,8 @@ int CheckJitState(JNIEnv *env, jclass clazz, jobject target_method) {
     void *art_method = (void *)(*env)->FromReflectedMethod(env, target_method);
 
     AddArtMethodAccessFlag(art_method, kAccCompileDontBother);
+
+    disableFastInterpreterForQ(art_method);
 
     uint32_t hotness_count = GetArtMethodHotnessCount(art_method);
 
@@ -883,8 +910,7 @@ jint DoReplaceHook(JNIEnv *env, jclass clazz, jobject target_method, jobject hoo
 
 static JNINativeMethod JniMethods[] = {
 
-        {"disableHiddenApiCheck",             "()V",                                                          (void *) DisableHiddenApiCheck},
-        {"init",               				  "(I)V",                                                         (void *) Init},
+        {"init",               				  "(I)I",                                                         (void *) Init},
         {"disableJITInline",               	  "()V",                                                          (void *) DisableJITInline},
         {"getMethodEntryPoint",               "(Ljava/lang/reflect/Member;)J",                                (void *) GetMethodEntryPoint},
         {"compileMethod",            		  "(Ljava/lang/reflect/Member;)Z",                                (void *) CompileMethod},
