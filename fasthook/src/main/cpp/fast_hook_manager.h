@@ -1,4 +1,5 @@
 #include <android/log.h>
+#include "dlfcn_nougat.h"
 
 #define LOG_TAG "FastHookManager"
 #define LOG_DEBUG 1

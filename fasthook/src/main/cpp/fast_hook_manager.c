@@ -8,8 +8,8 @@
 #include <pthread.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <bits/sysconf.h>
 
-#include "enhanced_dlfcn.h"
 #include "fast_hook_manager.h"
 
 void fake_jit_update_options(void* handle) {
@@ -24,48 +24,48 @@ static inline void InitJit() {
     void *art_lib = NULL;
 
     if(pointer_size_ == kPointerSize32) {
-        if (SDK_INT >= kAndroidQ && file_exists("/apex/com.android.runtime/lib/libart-compiler.so")) {
-            jit_lib = enhanced_dlopen("/apex/com.android.runtime/lib/libart-compiler.so", RTLD_NOW);
-            art_lib = enhanced_dlopen("/apex/com.android.runtime/lib/libart.so", RTLD_NOW);
+        if (SDK_INT >= kAndroidQ) {
+            jit_lib = fake_dlopen("/apex/com.android.runtime/lib/libart-compiler.so", RTLD_NOW);
+            art_lib = fake_dlopen("/apex/com.android.runtime/lib/libart.so", RTLD_NOW);
         } else {
-            jit_lib = enhanced_dlopen("/system/lib/libart-compiler.so", RTLD_NOW);
-            art_lib = enhanced_dlopen("/system/lib/libart.so", RTLD_NOW);
+            jit_lib = fake_dlopen("/system/lib/libart-compiler.so", RTLD_NOW);
+            art_lib = fake_dlopen("/system/lib/libart.so", RTLD_NOW);
         }
     }else {
-        if (SDK_INT >= kAndroidQ && file_exists("/apex/com.android.runtime/lib64/libart-compiler.so")) {
-            jit_lib = enhanced_dlopen("/apex/com.android.runtime/lib64/libart-compiler.so", RTLD_NOW);
-            art_lib = enhanced_dlopen("/apex/com.android.runtime/lib64/libart.so", RTLD_NOW);
+        if (SDK_INT >= kAndroidQ) {
+            jit_lib = fake_dlopen("/apex/com.android.runtime/lib64/libart-compiler.so", RTLD_NOW);
+            art_lib = fake_dlopen("/apex/com.android.runtime/lib64/libart.so", RTLD_NOW);
         } else {
-            jit_lib = enhanced_dlopen("/system/lib64/libart-compiler.so", RTLD_NOW);
-            art_lib = enhanced_dlopen("/system/lib64/libart.so", RTLD_NOW);
+            jit_lib = fake_dlopen("/system/lib64/libart-compiler.so", RTLD_NOW);
+            art_lib = fake_dlopen("/system/lib64/libart.so", RTLD_NOW);
         }
     }
 
-    art_quick_to_interpreter_bridge_ = enhanced_dlsym(art_lib, "art_quick_to_interpreter_bridge");
+    art_quick_to_interpreter_bridge_ = fake_dlsym(art_lib, "art_quick_to_interpreter_bridge");
 
     if (SDK_INT >= kAndroidN) {
-        profileSaver_ForceProcessProfiles = (void (*)()) enhanced_dlsym(jit_lib, "_ZN3art12ProfileSaver20ForceProcessProfilesEv");
+        profileSaver_ForceProcessProfiles = (void (*)()) fake_dlsym(jit_lib, "_ZN3art12ProfileSaver20ForceProcessProfilesEv");
     }
 
     if (SDK_INT < kAndroidQ) {
-        jit_compile_method_ = (bool (*)(void *, void *, void *, bool)) enhanced_dlsym(jit_lib, "jit_compile_method");
+        jit_compile_method_ = (bool (*)(void *, void *, void *, bool)) fake_dlsym(jit_lib, "jit_compile_method");
     } else {
-        jit_compile_method_Q_ = (bool (*)(void *, void *, void *, bool, bool)) enhanced_dlsym(jit_lib, "jit_compile_method");
-        origin_jit_update_options = (void (**)(void *))(enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_update_options_E"));
+        jit_compile_method_Q_ = (bool (*)(void *, void *, void *, bool, bool)) fake_dlsym(jit_lib, "jit_compile_method");
+        origin_jit_update_options = (void (**)(void *))(fake_dlsym(art_lib, "_ZN3art3jit3Jit19jit_update_options_E"));
     }
 
     if (origin_jit_update_options != NULL) {
         *origin_jit_update_options = fake_jit_update_options;
     }
 
-    jit_load_ = (void* (*)(bool*))(enhanced_dlsym(jit_lib, "jit_load"));
+    jit_load_ = (void* (*)(bool*))(fake_dlsym(jit_lib, "jit_load"));
     bool will_generate_debug_symbols = false;
 
     if (jit_load_ == NULL) {
-        jit_compiler_handle_ = *art_jit_compiler_handle_ = enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
+        jit_compiler_handle_ = *art_jit_compiler_handle_ = fake_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
     } else {
         jit_compiler_handle_ = (jit_load_)(&will_generate_debug_symbols);
-        art_jit_compiler_handle_ = enhanced_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
+        art_jit_compiler_handle_ = fake_dlsym(art_lib, "_ZN3art3jit3Jit20jit_compiler_handle_E");
     }
 
 }
