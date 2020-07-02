@@ -149,141 +149,34 @@ public class FastHookManager {
             mode = MODE_REWRITE;
         }
 
-        switch(mode) {
-            case MODE_REWRITE:
-                long entryPoint = getMethodEntryPoint(targetMethod);
-                Logd("EntryPoint:0x"+Long.toHexString(entryPoint));
+        if (mode == MODE_REPLACE) {
+            if (Build.VERSION.SDK_INT < ANDROID_N) {
+                doReplaceHookInternal(targetMethod, hookMethod, forwardMethod, isNative);
+            } else {
+                int jitState = checkJitState(targetMethod);
+                Logd("jitState:" + jitState);
 
-                ArrayList<HookRecord> quickTrampolineList = mQuickTrampolineMap.get(Long.valueOf(entryPoint));
-                if(quickTrampolineList != null) {
-                    int i = 0;
-                    for(HookRecord record:quickTrampolineList) {
-                        Logd("record["+i+"]:"+record);
-                    }
-
-                    HookRecord tailRecord = quickTrampolineList.get(quickTrampolineList.size() - 1);
-                    HookRecord prevRecord = quickTrampolineList.get(quickTrampolineList.size() - 2);
-                    long quickOriginalTrampoline =  tailRecord.mQuickOriginalTrampoline;
-                    long prevQuickHookTrampoline = prevRecord.mQuickHookTrampoline;
-                    HookRecord targetRecord = new HookRecord(TYPE_RECORD_REWRITE, targetMethod, hookMethod, forwardMethod, 0, 0, 1, quickTrampolineList);
-
-                    doPartRewriteHook(targetMethod,hookMethod,forwardMethod,quickOriginalTrampoline,prevQuickHookTrampoline,targetRecord);
-                    Logd("QuickHookTrampoline:0x"+Long.toHexString(targetRecord.mQuickHookTrampoline)+" QuickTargetTrampoline:0x"+Long.toHexString(targetRecord.mQuickTargetTrampoline));
-
-                    quickTrampolineList.add(quickTrampolineList.size() - 1,targetRecord);
-                    targetRecord.index = quickTrampolineList.size() - 2;
-                    tailRecord.index = quickTrampolineList.size() - 1;
-                    mHookMap.put(targetMethod,targetRecord);
-                }else {
-                    if(Build.VERSION.SDK_INT < ANDROID_N) {
-                        boolean success = isCompiled(targetMethod);
-                        if(success) {
-                            success = doRewriteHookCheck(targetMethod);
-                        }
-
-                        if(success) {
-                            doFullRewriteHookInternal(targetMethod,hookMethod,forwardMethod);
-                        }else {
-                            if(Build.VERSION.SDK_INT == ANDROID_L) {
-                                Loge("hook failed!");
-                                return;
-                            }
-                            doReplaceHookInternal(targetMethod,hookMethod,forwardMethod,isNative);
-                        }
-                    }else {
-                        int jitState = checkJitState(targetMethod);
-                        Logd("jitState:"+jitState);
-
-                        switch (jitState) {
-                            case JIT_COMPILING:
-                            case JIT_COMPILINGORFAILED:
-                                if (retryCount < RETRY_LIMIT) {
-                                    int newCount = retryCount + 1;
-                                    sendRetryMessage(targetMethod,hookMethod,forwardMethod,mode,newCount);
-                                    break;
-                                }
-                            case JIT_NONE:
-                            case JIT_COMPILE:
-                                boolean success = true;
-                                boolean needCompile = !isCompiled(targetMethod);
-
-                                if(jitState == JIT_NONE && needCompile) {
-                                    success = compileMethod(targetMethod);
-
-                                    if(success) {
-                                        success = doRewriteHookCheck(targetMethod);
-                                    }
-                                }else if(jitState == JIT_COMPILE) {
-                                    success = doRewriteHookCheck(targetMethod);
-                                }else if(jitState == JIT_COMPILINGORFAILED) {
-                                    success = false;
-                                }
-
-                                if(success) {
-                                    doFullRewriteHookInternal(targetMethod,hookMethod,forwardMethod);
-                                }else {
-                                    if(Build.VERSION.SDK_INT == ANDROID_L) {
-                                        Loge("hook failed!");
-                                        return;
-                                    }
-                                    if(Build.VERSION.SDK_INT >= ANDROID_O && BuildConfig.DEBUG) {
-                                        setNativeMethod(targetMethod);
-                                        Logd("set target method to native on debug mode");
-                                    }
-                                    doReplaceHookInternal(targetMethod,hookMethod,forwardMethod,isNative);
-                                }
-                                break;
-                        }
-                    }
-                }
-                break;
-            case MODE_REPLACE:
-                if(Build.VERSION.SDK_INT < ANDROID_N) {
-                    doReplaceHookInternal(targetMethod,hookMethod,forwardMethod,isNative);
-                }else {
-                    int jitState = checkJitState(targetMethod);
-                    Logd("jitState:"+jitState);
-
-                    switch (jitState) {
-                        case JIT_COMPILING:
-                        case JIT_COMPILINGORFAILED:
-                            if (retryCount < RETRY_LIMIT) {
-                                int newCount = retryCount + 1;
-                                sendRetryMessage(targetMethod,hookMethod,forwardMethod,mode,newCount);
-                                break;
-                            }
-                        case JIT_NONE:
-                        case JIT_COMPILE:
-                            if(Build.VERSION.SDK_INT >= ANDROID_O && BuildConfig.DEBUG) {
-                                setNativeMethod(targetMethod);
-                                Logd("set target method to native on debug mode");
-                            }
-                            doReplaceHookInternal(targetMethod,hookMethod,forwardMethod,isNative);
+                switch (jitState) {
+                    case JIT_COMPILING:
+                    case JIT_COMPILINGORFAILED:
+                        if (retryCount < RETRY_LIMIT) {
+                            int newCount = retryCount + 1;
+                            sendRetryMessage(targetMethod, hookMethod, forwardMethod, mode, newCount);
                             break;
-                    }
+                        }
+                    case JIT_NONE:
+                    case JIT_COMPILE:
+                        if (Build.VERSION.SDK_INT >= ANDROID_O && BuildConfig.DEBUG) {
+                            setNativeMethod(targetMethod);
+                            Logd("set target method to native on debug mode");
+                        }
+                        doReplaceHookInternal(targetMethod, hookMethod, forwardMethod, isNative);
+                        break;
                 }
-                break;
+            }
         }
 
         Logd("doHook finish");
-    }
-
-    private static void doFullRewriteHookInternal(Member targetMethod, Member hookMethod, Member forwardMethod) {
-        ArrayList<HookRecord> newQuickTrampolineList = new ArrayList<HookRecord>();
-
-        HookRecord headRecord = new HookRecord(TYPE_RECORD_REWRITE_HEAD, 0, 0, newQuickTrampolineList);
-        HookRecord targetRecord = new HookRecord(TYPE_RECORD_REWRITE, targetMethod, hookMethod, forwardMethod, 0, 0, 1, newQuickTrampolineList);
-        HookRecord tailRecord = new HookRecord(TYPE_RECORD_REWRITE_TAIL, 0, 2, newQuickTrampolineList);
-
-        doFullRewriteHook(targetMethod, hookMethod, forwardMethod, headRecord, targetRecord, tailRecord);
-        Logd("JumpTrampoline:0x"+Long.toHexString(headRecord.mJumpTrampoline)+" QuickHookTrampoline:0x"+Long.toHexString(targetRecord.mQuickHookTrampoline)+" QuickTargetTrampoline:0x"+Long.toHexString(targetRecord.mQuickTargetTrampoline)+" QuickOriginalTrampoline:0x"+Long.toHexString(tailRecord.mQuickOriginalTrampoline));
-
-        newQuickTrampolineList.add(headRecord);
-        newQuickTrampolineList.add(targetRecord);
-        newQuickTrampolineList.add(tailRecord);
-
-        mQuickTrampolineMap.put(Long.valueOf(getMethodEntryPoint(targetMethod)),newQuickTrampolineList);
-        mHookMap.put(targetMethod,targetRecord);
     }
 
     private static void doReplaceHookInternal(Member targetMethod, Member hookMethod, Member forwardMethod, boolean isNative) {
@@ -452,36 +345,10 @@ public class FastHookManager {
         public Member mTargetMethod;
         public Member mHookMethod;
         public Member mForwardMethod;
-        public long mJumpTrampoline;
-        public long mQuickHookTrampoline;
-        public long mQuickOriginalTrampoline;
-        public long mQuickTargetTrampoline;
         public long mHookTrampoline;
         public long mTargetTrampoline;
         public int index;
         public ArrayList<HookRecord> mQuickTrampolineList;
-
-        public HookRecord(int type, Member targetMethod, Member hookMethod, Member forwardMethod, long quickHookTrampoline, long quickTargetTrampoline, int index, ArrayList<HookRecord> quickTrampolineList) {
-            this.mType = type;
-            this.mTargetMethod = targetMethod;
-            this.mHookMethod = hookMethod;
-            this.mForwardMethod = forwardMethod;
-            this.mQuickHookTrampoline = quickHookTrampoline;
-            this.mQuickTargetTrampoline = quickTargetTrampoline;
-            this.index = index;
-            this.mQuickTrampolineList = quickTrampolineList;
-        }
-
-        public HookRecord(int type, long quickTrampoline, int index, ArrayList<HookRecord> quickTrampolineList) {
-            this.mType = type;
-            if(type == TYPE_RECORD_REWRITE_HEAD) {
-                this.mQuickOriginalTrampoline = quickTrampoline;
-            }else if(type == TYPE_RECORD_REWRITE_TAIL) {
-                this.mJumpTrampoline = quickTrampoline;
-            }
-            this.index = index;
-            this.mQuickTrampolineList = quickTrampolineList;
-        }
 
         public HookRecord(int type, Member targetMethod, Member hookMethod, Member forwardMethod, long hookTrampoline, long targetTrampoline) {
             this.mType = type;
@@ -494,17 +361,6 @@ public class FastHookManager {
 
         public String toString() {
             StringBuilder sb = new StringBuilder("");
-            switch(mType) {
-                case TYPE_RECORD_REWRITE_HEAD:
-                    sb.append("HEAD Jump:"+Long.toHexString(mJumpTrampoline)+" index:"+index);
-                    break;
-                case TYPE_RECORD_REWRITE:
-                    sb.append("RECORD target:"+mTargetMethod.getName()+" hook:"+mHookMethod.getName()+" forward:"+mForwardMethod.getName()+" hook trampoline:0x"+Long.toHexString(mQuickHookTrampoline)+" target trampoline:0x"+Long.toHexString(mQuickTargetTrampoline)+" index:"+index);
-                    break;
-                case TYPE_RECORD_REWRITE_TAIL:
-                    sb.append("TAIL original:"+Long.toHexString(mQuickOriginalTrampoline)+" index:"+index);
-                    break;
-            }
             return sb.toString();
         }
     }
@@ -558,7 +414,5 @@ public class FastHookManager {
     private native static boolean isNativeMethod(Member method);
     private native static void setNativeMethod(Member method);
     private native static int checkJitState(Member method);
-    private native static int doFullRewriteHook(Member targetMethod, Member hookMethod, Member forwardMethod, HookRecord headRecord, HookRecord targetRecord, HookRecord tailRecord);
-    private native static int doPartRewriteHook(Member targetMethod, Member hookMethod, Member forwardMethod, long quickOriginalTrampoline, long prevQuickHookTrampoline, HookRecord targetRecord);
     private native static int doReplaceHook(Member targetMethod, Member hookMethod, Member forwardMethod, boolean isNative, HookRecord targetRecord);
 }

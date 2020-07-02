@@ -134,16 +134,6 @@ static inline void *CreatTrampoline(int type) {
     void *trampoline = NULL;
     uint32_t size = 0;
     switch(type) {
-        case kJumpTrampoline:
-            size = RoundUp(sizeof(jump_trampoline_),pointer_size_);
-            break;
-        case kQuickHookTrampoline:
-            size = RoundUp(sizeof(quick_hook_trampoline_),pointer_size_);
-            break;
-        case kQuickOriginalTrampoline:
-        case kQuickTargetTrampoline:
-            size = RoundUp(sizeof(quick_target_trampoline_),pointer_size_);
-            break;
         case kHookTrampoline:
             size = RoundUp(sizeof(hook_trampoline_),pointer_size_);
             break;
@@ -159,16 +149,6 @@ static inline void *CreatTrampoline(int type) {
     trampoline = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
 
     switch(type) {
-        case kJumpTrampoline:
-            memcpy(trampoline, jump_trampoline_, sizeof(jump_trampoline_));
-            break;
-        case kQuickHookTrampoline:
-            memcpy(trampoline, quick_hook_trampoline_, sizeof(quick_hook_trampoline_));
-            break;
-        case kQuickOriginalTrampoline:
-        case kQuickTargetTrampoline:
-            memcpy(trampoline, quick_target_trampoline_, sizeof(quick_target_trampoline_));
-            break;
         case kHookTrampoline:
             memcpy(trampoline, hook_trampoline_, sizeof(hook_trampoline_));
             break;
@@ -397,56 +377,6 @@ bool IsCompiled(JNIEnv *env, jclass clazz, jobject method) {
     return ret;
 }
 
-bool DoRewriteHookCheck(JNIEnv *env, jclass clazz, jobject method) {
-    void *art_method = (void *)(*env)->FromReflectedMethod(env, method);
-    void *method_entry = (void *)ReadPointer((unsigned char *)art_method + kArtMethodQuickCodeOffset);
-#if defined(__arm__)
-    void *method_code = EntryPointToCodePoint(method_entry);
-#elif defined(__aarch64__)
-    void *method_code = method_entry;
-#endif
-
-    uint32_t size = ReadInt32((unsigned char *)method_code - 4) & kCodeSizeMask;
-
-    if(size < sizeof(jump_trampoline_)) {
-        return false;
-    }
-
-#if defined(__arm__)
-
-    int index = 0;
-    while(index < sizeof(jump_trampoline_)) {
-        uint16_t inst = ReadInt16((unsigned char *)method_code + index);
-        if(IsThumb32(inst,IsLittleEnd())) {
-            uint32_t inst_32 = ReadInt32((unsigned char *)method_code + index + 4);
-            if(HasThumb32PcRelatedInst(inst_32))
-                return false;
-
-            index += 4;
-        }else {
-            if(HasThumb16PcRelatedInst(inst))
-                return false;
-
-            index += 2;
-        }
-    }
-
-    return true;
-#elif defined(__aarch64__)
-
-    int index = 0;
-    while(index < sizeof(jump_trampoline_)) {
-        uint32_t inst = ReadInt32((unsigned char *)method_code + index);
-        if(HasArm64PcRelatedInst(inst))
-            return false;
-
-        index += 4;
-    }
-
-    return true;
-#endif
-}
-
 bool IsNativeMethod(JNIEnv *env, jclass clazz, jobject method) {
     void *art_method = (void *)(*env)->FromReflectedMethod(env, method);
 
@@ -500,312 +430,6 @@ int CheckJitState(JNIEnv *env, jclass clazz, jobject target_method) {
     }
 
     return kNone;
-}
-
-jint DoFullRewriteHook(JNIEnv *env, jclass clazz, jobject target_method, jobject hook_method, jobject forward_method, jobject head_record, jobject target_record, jobject tail_record) {
-    void *art_target_method = (void *)(*env)->FromReflectedMethod(env, target_method);
-    void *art_hook_method = (void *)(*env)->FromReflectedMethod(env, hook_method);
-    void *art_forward_method = NULL;
-    if(forward_method != NULL) {
-        art_forward_method = (void *)(*env)->FromReflectedMethod(env, forward_method);
-    }
-
-    void *jump_trampoline = CreatTrampoline(kJumpTrampoline);
-    void *quick_hook_trampoline = CreatTrampoline(kQuickHookTrampoline);
-    void *quick_original_trampoline = CreatTrampoline(kQuickOriginalTrampoline);
-    void *quick_target_trampoline = NULL;
-    if(art_forward_method) {
-        quick_target_trampoline = CreatTrampoline(kQuickTargetTrampoline);
-    }
-
-#if defined(__arm__)
-
-    void *target_entry = (void *)ReadPointer((unsigned char *) art_target_method + kArtMethodQuickCodeOffset);
-    void *target_code = EntryPointToCodePoint(target_entry);
-    void *quick_hook_trampoline_entry = CodePointToEntryPoint(quick_hook_trampoline);
-    void *hook_entry = (void *)ReadPointer((unsigned char *) art_hook_method + kArtMethodQuickCodeOffset);
-    void *next_entry = CodePointToEntryPoint(quick_original_trampoline);
-    void *forward_entry = CodePointToEntryPoint(quick_target_trampoline);
-
-    int jump_trampoline_len = 2 * 4;
-    int quick_hook_trampoline_len = 12 * 4;
-    int quick_target_trampoline_len = 7 * 4;
-    int quick_original_trampoline_len = 7 * 4;
-    int original_prologue_len = 0;
-    while(original_prologue_len < jump_trampoline_len) {
-        if(IsThumb32(ReadInt16((unsigned char *)target_code + original_prologue_len),IsLittleEnd())) {
-            original_prologue_len += 4;
-        }else {
-            original_prologue_len += 2;
-        }
-    }
-    LOGI("OriginalPrologueLen:%d",original_prologue_len);
-
-    int jump_trampoline_entry_index = 4;
-
-    int quick_hook_trampoline_target_index = 32;
-    int quick_hook_trampoline_hook_index = 36;
-    int quick_hook_trampoline_hook_entry_index = 40;
-    int quick_hook_trampoline_next_entry_index = 44;
-
-    int quick_target_trampoline_original_index = 4;
-    int quick_target_trampoline_target_index = 20;
-    int quick_target_trampoline_original_next_entry = 24;
-
-    int quick_original_trampoline_target_index = 4;
-    int quick_original_trampoline_original_next_entry = 24;
-
-    void *original_next_entry = CodePointToEntryPoint((void *)((long)target_entry + original_prologue_len));
-
-    unsigned char *original_code = (unsigned char *) quick_original_trampoline;
-    original_code[0] = 0x00;
-    original_code[1] = 0xbf;
-    original_code[2] = 0x00;
-    original_code[3] = 0xbf;
-
-#elif defined(__aarch64__)
-
-    void *target_entry = (void *)ReadPointer((unsigned char *) art_target_method + kArtMethodQuickCodeOffset);
-	void *target_code = target_entry;
-	void *quick_hook_trampoline_entry = quick_hook_trampoline;
-	void *hook_entry = (void *)ReadPointer((unsigned char *) art_hook_method + kArtMethodQuickCodeOffset);
-	void *next_entry = quick_original_trampoline;
-	void *forward_entry = quick_target_trampoline;
-
-	int jump_trampoline_len = 4 * 4;
-	int quick_hook_trampoline_len = 16 * 4;
-	int quick_target_trampoline_len = 11 * 4;
-	int quick_original_trampoline_len = 11 * 4;
-	int original_prologue_len = 16;
-
-	int jump_trampoline_entry_index = 8;
-
-	int quick_hook_trampoline_target_index = 32;
-	int quick_hook_trampoline_hook_index = 40;
-	int quick_hook_trampoline_hook_entry_index = 48;
-	int quick_hook_trampoline_next_entry_index = 56;
-
-	int quick_target_trampoline_original_index = 4;
-	int quick_target_trampoline_target_index = 28;
-	int quick_target_trampoline_original_next_entry = 36;
-
-	int quick_original_trampoline_target_index = 4;
-	int quick_original_trampoline_original_next_entry = 36;
-
-	void *original_next_entry = (void *)((long)target_entry + original_prologue_len);
-
-	unsigned char *original_code = (unsigned char *) quick_original_trampoline;
-	original_code[0] = 0x1f;
-	original_code[1] = 0x20;
-	original_code[2] = 0x03;
-	original_code[3] = 0xd5;
-
-#endif
-
-    unsigned char original_prologue[original_prologue_len];
-    memcpy(original_prologue,(unsigned char *)target_code,original_prologue_len);
-    for(int i = 0;i < 3;i++) {
-        LOGI("OriginalPrologue[%d] %x %x %x %x",i,((unsigned char*)original_prologue)[i*4+0],((unsigned char*)original_prologue)[i*4+1],((unsigned char*)original_prologue)[i*4+2],((unsigned char*)original_prologue)[i*4+3]);
-    }
-
-    memcpy(jump_trampoline + jump_trampoline_entry_index, &quick_hook_trampoline_entry, pointer_size_);
-    for(int i = 0;i < jump_trampoline_len/4;i++) {
-        LOGI("JumpTrampoline[%d] %x %x %x %x",i,((unsigned char*)jump_trampoline)[i*4+0],((unsigned char*)jump_trampoline)[i*4+1],((unsigned char*)jump_trampoline)[i*4+2],((unsigned char*)jump_trampoline)[i*4+3]);
-    }
-
-
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_target_index, &art_target_method, pointer_size_);
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_hook_index, &art_hook_method, pointer_size_);
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_hook_entry_index, &hook_entry, pointer_size_);
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_next_entry_index, &next_entry, pointer_size_);
-    for(int i = 0;i < quick_hook_trampoline_len/4;i++) {
-        LOGI("QuickHookTrampoline[%d] %x %x %x %x",i,((unsigned char*)quick_hook_trampoline)[i*4+0],((unsigned char*)quick_hook_trampoline)[i*4+1],((unsigned char*)quick_hook_trampoline)[i*4+2],((unsigned char*)quick_hook_trampoline)[i*4+3]);
-    }
-
-    if(art_forward_method) {
-        memcpy(quick_target_trampoline + quick_target_trampoline_original_index, original_prologue, original_prologue_len);
-        memcpy(quick_target_trampoline + quick_target_trampoline_target_index, &art_target_method, pointer_size_);
-        memcpy(quick_target_trampoline + quick_target_trampoline_original_next_entry, &original_next_entry, pointer_size_);
-        for(int i = 0;i < quick_target_trampoline_len/4;i++) {
-            LOGI("QuickTargetTrampoline[%d] %x %x %x %x",i,((unsigned char*)quick_target_trampoline)[i*4+0],((unsigned char*)quick_target_trampoline)[i*4+1],((unsigned char*)quick_target_trampoline)[i*4+2],((unsigned char*)quick_target_trampoline)[i*4+3]);
-        }
-    }
-
-    memcpy(quick_original_trampoline + quick_original_trampoline_target_index, original_prologue, original_prologue_len);
-    memcpy(quick_original_trampoline + quick_original_trampoline_original_next_entry, &original_next_entry, pointer_size_);
-    for(int i = 0;i < quick_original_trampoline_len/4;i++) {
-        LOGI("QuickOriginalTrampoline[%d] %x %x %x %x",i,((unsigned char*)quick_original_trampoline)[i*4+0],((unsigned char*)quick_original_trampoline)[i*4+1],((unsigned char*)quick_original_trampoline)[i*4+2],((unsigned char*)quick_original_trampoline)[i*4+3]);
-    }
-
-    if(art_forward_method) {
-        memcpy((unsigned char *) art_forward_method + kArtMethodQuickCodeOffset,&forward_entry,pointer_size_);
-        LOGI("Forward NewEntry:%p",ReadPointer((unsigned char *) art_forward_method + kArtMethodQuickCodeOffset));
-    }
-
-    __builtin___clear_cache(quick_hook_trampoline, quick_hook_trampoline + quick_hook_trampoline_len);
-    __builtin___clear_cache(quick_original_trampoline, quick_original_trampoline + quick_original_trampoline_len);
-    if(art_forward_method) {
-        __builtin___clear_cache(quick_target_trampoline, quick_target_trampoline + quick_target_trampoline_len);
-    }
-
-    sigaction_info_->addr = target_code;
-    sigaction_info_->len = jump_trampoline_len;
-    if(current_handler_ == NULL) {
-        default_handler_ = (struct sigaction *)malloc(sizeof(struct sigaction));
-        current_handler_ = (struct sigaction *)malloc(sizeof(struct sigaction));
-        memset(default_handler_, 0, sizeof(sigaction));
-        memset(current_handler_, 0, sizeof(sigaction));
-
-        current_handler_->sa_sigaction = SignalHandle;
-        current_handler_->sa_flags = SA_SIGINFO;
-
-        sigaction(SIGSEGV, current_handler_, default_handler_);
-    }else {
-        sigaction(SIGSEGV, current_handler_, NULL);
-    }
-
-    long page_size = sysconf(_SC_PAGESIZE);
-    unsigned alignment = (unsigned)((unsigned long long)target_code % page_size);
-    int ret = mprotect((void *) (target_code - alignment), (size_t) (alignment + jump_trampoline_len),
-                       PROT_READ | PROT_WRITE | PROT_EXEC);
-    LOGI("Mprotect:%d Pagesize:%d Alignment:%d",ret,page_size,alignment);
-
-    memcpy((unsigned char *) art_target_method + kArtMethodQuickCodeOffset,&art_quick_to_interpreter_bridge_,pointer_size_);
-    memcpy(target_code, jump_trampoline, jump_trampoline_len);
-    for(int i = 0;i < jump_trampoline_len/4;i++) {
-        LOGI("TargetCode[%d] %x %x %x %x",i,((unsigned char *)target_code)[i*4+0],((unsigned char *)target_code)[i*4+1],((unsigned char *)target_code)[i*4+2],((unsigned char *)target_code)[i*4+3]);
-    }
-
-    sigaction_info_->addr = NULL;
-    sigaction_info_->len = 0;
-    sigaction(SIGSEGV, default_handler_, NULL);
-
-    memcpy((unsigned char *) art_target_method + kArtMethodQuickCodeOffset,&target_entry,pointer_size_);
-
-    __builtin___clear_cache(target_code, target_code + jump_trampoline_len);
-
-    (*env)->SetLongField(env, head_record, kHookRecordClassInfo.jump_trampoline_, (long)jump_trampoline);
-    (*env)->SetLongField(env, target_record, kHookRecordClassInfo.quick_hook_trampoline_, (long)quick_hook_trampoline);
-    if(art_forward_method) {
-        (*env)->SetLongField(env, target_record, kHookRecordClassInfo.quick_target_trampoline_, (long)quick_target_trampoline);
-    }
-    (*env)->SetLongField(env, tail_record, kHookRecordClassInfo.quick_original_trampoline_, (long)quick_original_trampoline);
-
-    return 0;
-}
-
-jint DoPartRewriteHook(JNIEnv *env, jclass clazz, jobject target_method, jobject hook_method, jobject forward_method, jlong quick_original_trampoline, jlong prev_quick_hook_trampoline, jobject target_record) {
-    void *art_target_method = (void *)(*env)->FromReflectedMethod(env, target_method);
-    void *art_hook_method = (void *)(*env)->FromReflectedMethod(env, hook_method);
-    void *art_forward_method = NULL;
-    if(forward_method != NULL) {
-        art_forward_method = (void *)(*env)->FromReflectedMethod(env, forward_method);
-    }
-
-    void *quick_hook_trampoline = CreatTrampoline(kQuickHookTrampoline);
-    void *quick_target_trampoline = NULL;
-    if(art_forward_method) {
-        quick_target_trampoline = CreatTrampoline(kQuickTargetTrampoline);
-    }
-
-#if defined(__arm__)
-
-    void *target_entry = (void *)ReadPointer((unsigned char *) art_target_method + kArtMethodQuickCodeOffset);
-    void *hook_entry = (void *)ReadPointer((unsigned char *) art_hook_method + kArtMethodQuickCodeOffset);
-    void *next_entry = CodePointToEntryPoint((void *)quick_original_trampoline);
-    void *prev_next_entry = CodePointToEntryPoint(quick_hook_trampoline);
-    void *forward_entry = CodePointToEntryPoint(quick_target_trampoline);
-
-    int quick_hook_trampoline_len = 12 * 4;
-    int quick_target_trampoline_len = 7 * 4;
-
-    int quick_hook_trampoline_target_index = 32;
-    int quick_hook_trampoline_hook_index = 36;
-    int quick_hook_trampoline_hook_entry_index = 40;
-    int quick_hook_trampoline_next_entry_index = 44;
-
-    int original_prologue_len = 12;
-    int quick_original_trampoline_original_index = 4;
-    int quick_original_trampoline_next_entry_index = 24;
-
-    int quick_target_trampoline_original_index = 4;
-    int quick_target_trampoline_target_index = 20;
-    int quick_target_trampoline_next_entry_index = 24;
-
-#elif defined(__aarch64__)
-
-    void *target_entry = (void *)ReadPointer((unsigned char *) art_target_method + kArtMethodQuickCodeOffset);
-	void *hook_entry = (void *)ReadPointer((unsigned char *) art_hook_method + kArtMethodQuickCodeOffset);
-	void *next_entry = (void *)quick_original_trampoline;
-	void *prev_next_entry = quick_hook_trampoline;
-	void *forward_entry = quick_target_trampoline;
-
-	int quick_hook_trampoline_len = 16 * 4;
-	int quick_target_trampoline_len = 11 * 4;
-
-	int quick_hook_trampoline_target_index = 32;
-	int quick_hook_trampoline_hook_index = 40;
-	int quick_hook_trampoline_hook_entry_index = 48;
-	int quick_hook_trampoline_next_entry_index = 56;
-
-	int original_prologue_len = 16;
-	int quick_original_trampoline_original_index = 4;
-	int quick_original_trampoline_next_entry_index = 36;
-
-	int quick_target_trampoline_original_index = 4;
-	int quick_target_trampoline_target_index = 28;
-	int quick_target_trampoline_next_entry_index = 36;
-
-#endif
-
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_target_index, &art_target_method, pointer_size_);
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_hook_index, &art_hook_method, pointer_size_);
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_hook_entry_index, &hook_entry, pointer_size_);
-    memcpy(quick_hook_trampoline + quick_hook_trampoline_next_entry_index, &next_entry, pointer_size_);
-    for(int i = 0;i < quick_hook_trampoline_len/4;i++) {
-        LOGI("QuickHookTrampoline[%d] %x %x %x %x",i,((unsigned char*)quick_hook_trampoline)[i*4+0],((unsigned char*)quick_hook_trampoline)[i*4+1],((unsigned char*)quick_hook_trampoline)[i*4+2],((unsigned char*)quick_hook_trampoline)[i*4+3]);
-    }
-
-    if(art_forward_method) {
-        unsigned char original_prologue[original_prologue_len];
-        memcpy(original_prologue,(unsigned char *)quick_original_trampoline + quick_original_trampoline_original_index,original_prologue_len);
-        for(int i = 0;i < original_prologue_len/4;i++) {
-            LOGI("OriginalPrologue[%d] %x %x %x %x",i,((unsigned char*)original_prologue)[i*4+0],((unsigned char*)original_prologue)[i*4+1],((unsigned char*)original_prologue)[i*4+2],((unsigned char*)original_prologue)[i*4+3]);
-        }
-
-        void *original_next_entry = (unsigned char *)quick_original_trampoline + quick_original_trampoline_next_entry_index;
-        memcpy(quick_target_trampoline + quick_target_trampoline_original_index, original_prologue, original_prologue_len);
-        memcpy(quick_target_trampoline + quick_target_trampoline_target_index, &art_target_method, pointer_size_);
-        memcpy(quick_target_trampoline + quick_target_trampoline_next_entry_index, &original_next_entry, pointer_size_);
-        for(int i = 0;i < quick_target_trampoline_len/4;i++) {
-            LOGI("QuickTargetTrampoline[%d] %x %x %x %x",i,((unsigned char*)quick_target_trampoline)[i*4+0],((unsigned char*)quick_target_trampoline)[i*4+1],((unsigned char*)quick_target_trampoline)[i*4+2],((unsigned char*)quick_target_trampoline)[i*4+3]);
-        }
-
-        void *forward_entry = CodePointToEntryPoint(quick_target_trampoline);
-        memcpy((char *) art_forward_method + kArtMethodQuickCodeOffset,&forward_entry,pointer_size_);
-        LOGI("Forward NewEntry:%p",ReadPointer((unsigned char *) art_forward_method + kArtMethodQuickCodeOffset));
-    }
-
-    __builtin___clear_cache(quick_hook_trampoline, quick_hook_trampoline + quick_hook_trampoline_len);
-    if(art_forward_method) {
-        __builtin___clear_cache(quick_target_trampoline, quick_target_trampoline + quick_target_trampoline_len);
-    }
-
-    memcpy((char *) art_target_method + kArtMethodQuickCodeOffset,&art_quick_to_interpreter_bridge_,pointer_size_);
-    memcpy((void *)(prev_quick_hook_trampoline + quick_hook_trampoline_next_entry_index), &prev_next_entry, pointer_size_);
-    for(int i = 0;i < quick_hook_trampoline_len/4;i++) {
-        LOGI("PrevQuickHookTrampoline[%d] %x %x %x %x",i,((unsigned char*)prev_quick_hook_trampoline)[i*4+0],((unsigned char*)prev_quick_hook_trampoline)[i*4+1],((unsigned char*)prev_quick_hook_trampoline)[i*4+2],((unsigned char*)prev_quick_hook_trampoline)[i*4+3]);
-    }
-    memcpy((char *) art_target_method + kArtMethodQuickCodeOffset,&target_entry,pointer_size_);
-
-    __builtin___clear_cache((void *)prev_quick_hook_trampoline, (unsigned char*)prev_quick_hook_trampoline + quick_hook_trampoline_len);
-
-    (*env)->SetLongField(env, target_record, kHookRecordClassInfo.quick_hook_trampoline_, (long)quick_hook_trampoline);
-    if(art_forward_method) {
-        (*env)->SetLongField(env, target_record, kHookRecordClassInfo.quick_target_trampoline_, (long)quick_target_trampoline);
-    }
-
-    return 0;
 }
 
 jint DoReplaceHook(JNIEnv *env, jclass clazz, jobject target_method, jobject hook_method, jobject forward_method, jboolean is_native, jobject target_record) {
@@ -915,14 +539,9 @@ static JNINativeMethod JniMethods[] = {
         {"getMethodEntryPoint",               "(Ljava/lang/reflect/Member;)J",                                (void *) GetMethodEntryPoint},
         {"compileMethod",            		  "(Ljava/lang/reflect/Member;)Z",                                (void *) CompileMethod},
         {"isCompiled",            		      "(Ljava/lang/reflect/Member;)Z",                               (void *) IsCompiled},
-        {"doRewriteHookCheck",                "(Ljava/lang/reflect/Member;)Z",                                (void *) DoRewriteHookCheck},
         {"isNativeMethod",                    "(Ljava/lang/reflect/Member;)Z",                                (void *) IsNativeMethod},
         {"setNativeMethod",                    "(Ljava/lang/reflect/Member;)V",                               (void *) SetNativeMethod},
         {"checkJitState",                     "(Ljava/lang/reflect/Member;)I",                               (void *) CheckJitState},
-        {"doFullRewriteHook",                 "(Ljava/lang/reflect/Member;Ljava/lang/reflect/Member;Ljava/lang/reflect/Member;Lpers/turing/technician/fasthook/FastHookManager$HookRecord;Lpers/turing/technician/fasthook/FastHookManager$HookRecord;Lpers/turing/technician/fasthook/FastHookManager$HookRecord;)I",
-                (void *) DoFullRewriteHook},
-        {"doPartRewriteHook",                 "(Ljava/lang/reflect/Member;Ljava/lang/reflect/Member;Ljava/lang/reflect/Member;JJLpers/turing/technician/fasthook/FastHookManager$HookRecord;)I",
-                (void *) DoPartRewriteHook},
         {"doReplaceHook",                     "(Ljava/lang/reflect/Member;Ljava/lang/reflect/Member;Ljava/lang/reflect/Member;ZLpers/turing/technician/fasthook/FastHookManager$HookRecord;)I",
                 (void *) DoReplaceHook}
 };
@@ -950,10 +569,6 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
 
     jclass hook_record_class = (*env)->FindClass(env, kHookRecordClassName);
-    kHookRecordClassInfo.jump_trampoline_ = (*env)->GetFieldID(env,hook_record_class, "mJumpTrampoline", "J");
-    kHookRecordClassInfo.quick_hook_trampoline_ = (*env)->GetFieldID(env,hook_record_class, "mQuickHookTrampoline", "J");
-    kHookRecordClassInfo.quick_original_trampoline_ = (*env)->GetFieldID(env,hook_record_class, "mQuickOriginalTrampoline", "J");
-    kHookRecordClassInfo.quick_target_trampoline_ = (*env)->GetFieldID(env,hook_record_class, "mQuickTargetTrampoline", "J");
     kHookRecordClassInfo.hook_trampoline_ = (*env)->GetFieldID(env,hook_record_class, "mHookTrampoline", "J");
     kHookRecordClassInfo.target_trampoline_ = (*env)->GetFieldID(env,hook_record_class, "mTargetTrampoline", "J");
 

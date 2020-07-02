@@ -52,10 +52,6 @@ enum Version {
 };
 
 enum TrampolineType {
-	kJumpTrampoline,
-	kQuickHookTrampoline,
-	kQuickOriginalTrampoline,
-	kQuickTargetTrampoline,
 	kHookTrampoline,
 	kTargetTrampoline
 };
@@ -68,10 +64,6 @@ enum JitState {
 };
 
 static struct {
-	jfieldID jump_trampoline_;
-	jfieldID quick_hook_trampoline_;
-	jfieldID quick_original_trampoline_;
-	jfieldID quick_target_trampoline_;
 	jfieldID hook_trampoline_;
 	jfieldID target_trampoline_;
 } kHookRecordClassInfo;
